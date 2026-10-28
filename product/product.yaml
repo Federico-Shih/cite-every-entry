@@ -1,0 +1,12 @@
+_ > nanoagent.plugin.v0001.ProductConfig:
+tagline: "Catalog data sources where every value shows the call it came from"
+summary: "Pick the domains, formats, access methods, licenses and update year you care about. The agent pages through a rate-limited catalog of 48 data sources, looks each match up, and records its name, access method, update year, record count and version in catalog.json, each value citing the id of the tool call that returned it. The catalog's listing is a cached index that can show a name cut short or a stale year, so the agent must look each source up. A deterministic check replays every citation against the call ledger: a value must equal what its cited call returned, exactly, and be the source's current value."
+highlights:
+  - "Every recorded value is traceable to one tool call, so nothing can be made up"
+  - "Values are checked exactly, type included: the version \"3\" is not the number 3"
+  - "Built-in mock catalog on a virtual clock: every run is the same and needs no network"
+steps:
+  - "Choose a filter: domains, formats, access methods, licenses and the earliest update year"
+  - "The agent lists the catalog page by page and looks up each matching source, waiting out rate limits"
+  - "It records each source's fields in catalog.json, every value with the call_id it came from"
+  - "It reports how many sources matched, and the check scores every citation"

@@ -1,0 +1,45 @@
+_ > nanoagent.plugin.v0001.ManifestConfig:
+id: cite-every-entry
+name: Cite Every Entry
+version: 0.1.1
+status: in-development
+spec: nanoagent.plugin/v0001
+
+runtime > nanoagent.plugin.v0001.RuntimeConfig:
+  type: mcp_stdio
+  command: [uv, run, --frozen, python, -m, plugin]
+
+permissions > nanoagent.plugin.v0001.PermissionsConfig:
+  network > nanoagent.plugin.v0001.NetworkConfig:
+    hosts: []
+  filesystem > nanoagent.plugin.v0001.FilesystemConfig:
+    write: [workspace]
+
+# One entry per contract.Tool; its input and output classes are contract.TOOLS's.
+tools > dict[contract.Tool, nanoagent.plugin.v0001.ToolConfig]:
+  list_sources:
+    description: List one page of the mock catalog's sources that match a filter, from a cached index that may show a name cut short or a stale year; the response carries its own call_id; rate-limited
+  get_source:
+    description: Describe one source with every field, its records count and version included; the response carries its own call_id; rate-limited
+  wait:
+    description: Wait a number of seconds on the catalog's clock, as a rate-limited call asks
+  record_entry:
+    description: Add one source to the workspace catalog, catalog.json, with every field's value and the call_id it came from
+  catalog_truth:
+    description: The id of every source the filter matches, and their count, the task's hidden reference
+
+# One entry per contract.Task; its input and output classes are contract.TASKS's.
+tasks > dict[contract.Task, nanoagent.plugin.v0001.TaskConfig]:
+  cite-every-entry:
+    description: Record every catalog source that matches a filter, each field citing the tool call it came from
+    runner: agent
+    tools: [list_sources, get_source, wait, record_entry]
+    reference: catalog_truth
+    instructions: |-
+      Record in catalog.json every source of the mock catalog that matches the task's filter, every field citing the call it came from, then submit their exact total.
+      Every list_sources and get_source response carries its own call_id. That id is what a field cites.
+      Call list_sources with the task's filter exactly as given and cursor null. Call it again with the same filter and the next_cursor the last page returned, until next_cursor is null: the last page can hold matches too. The catalog applies the filter to every source's current fields, so every listed source matches, even one whose listed updated year looks too old.
+      list_sources reads a cached index: for some sources it shows a name cut short with "…" or a stale updated year. get_source gives every field as it is now. For every listed source, call get_source with its id: records and version come only from get_source, and where the listing and get_source differ, get_source is right.
+      list_sources and get_source share one rate limit. When a call fails with "rate limited: wait N seconds", call wait with seconds N, then repeat the same call. A failed call returned nothing, so never cite its call_id: cite the call that succeeded.
+      Call record_entry once for every listed source. Give its id, and for each of name, access_method, updated, records and version a value and cites: the value exactly as the cited response gives it for that source (the same text, the same number, version kept a string), and cites the call_id of that list_sources or get_source response. Every value must be the source's current one: cite list_sources only for a value its listing shows exactly as get_source does. Never cite a call that did not return that source or that field, and never make up a call_id.
+      When every source is recorded, submit total: the number of sources you recorded, 0 when none matched.
