@@ -3,13 +3,15 @@
 #
 #   tests/run_agent.sh [arguments.json]
 #
-# arguments.json defaults to tests/examples/<plugin-id>.json. OPENROUTER_API_KEY comes from the environment,
+# arguments.json defaults to tests/examples/<plugin-id>.json. The run's input files, which NanoAgent copies to
+# workspace/inputs/, are the files INPUTS names (space-separated), else every file in tests/examples/inputs/, if any.
+# OPENROUTER_API_KEY comes from the environment,
 # or from the file ENV_FILE names (KEY=value lines); this plugin's own .env lists names only.
 # Each run goes to tests/results/<time>/ (ignored), next to the config it ran as tests/results/<time>.yaml:
 # result.json, verdict.json, reference.json, messages.json, run.log and workspace/.
 #
 # Overrides: NANOAGENT (the command to run, default nanoagent from PATH),
-# MODEL (an OpenRouter model id), MAX_STEPS, TIMEOUT (seconds per tool call), ENV_FILE.
+# MODEL (an OpenRouter model id), MAX_STEPS, TIMEOUT (seconds per tool call), ENV_FILE, INPUTS.
 # Exits 0 only when the verifier judged the run valid. It lives in tests/ because NanoAgent's layout rule
 # allows no other file at the plugin's top level.
 set -euo pipefail
@@ -24,6 +26,22 @@ read -r -a nanoagent <<< "${NANOAGENT:-nanoagent}"
 model="${MODEL:-deepseek/deepseek-v4-flash}"
 
 [[ -f "$arguments" ]] || { echo "no arguments file: $arguments" >&2; exit 2; }
+inputs=()
+if [[ -n "${INPUTS:-}" ]]; then
+  read -r -a inputs <<< "$INPUTS"
+elif [[ -d "$tests/examples/inputs" ]]; then
+  for file in "$tests/examples/inputs"/*; do
+    [[ -f "$file" ]] && inputs+=("$file")
+  done
+fi
+inputs_yaml="inputs: []"
+if (( ${#inputs[@]} )); then
+  inputs_yaml="inputs:"
+  for file in "${inputs[@]}"; do
+    [[ -f "$file" ]] || { echo "no input file: $file" >&2; exit 2; }
+    inputs_yaml+=$'\n'"  - $(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
+  done
+fi
 command -v "${nanoagent[0]}" > /dev/null || { echo "no ${nanoagent[0]} on PATH: see 'Develop and run' in $here/README.md (or set NANOAGENT)" >&2; exit 2; }
 if [[ -n "${ENV_FILE:-}" ]]; then
   [[ -f "$ENV_FILE" ]] || { echo "no ENV_FILE: $ENV_FILE" >&2; exit 2; }
@@ -45,7 +63,7 @@ _ > nanoagent.cli.plugin.PluginOpenRouterAgentConfig:
 plugin: $here
 task: $id
 arguments: $arguments
-inputs: []
+$inputs_yaml
 timeout: ${TIMEOUT:-60.0}
 llm > nanoagent.llm.openrouter.OpenRouterConfig:
   model: $model

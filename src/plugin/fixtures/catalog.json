@@ -9,10 +9,7 @@
    "license": "cc-by",
    "updated": 2014,
    "records": 8919,
-   "version": "2.1",
-   "listed": {
-    "name": "Global Surface…"
-   }
+   "version": "2.1"
   },
   {
    "id": "src-002",
@@ -67,10 +64,7 @@
    "license": "odbl",
    "updated": 2025,
    "records": 48514,
-   "version": "7",
-   "listed": {
-    "name": "Hospital Bed Capac…"
-   }
+   "version": "7"
   },
   {
    "id": "src-007",
@@ -136,10 +130,7 @@
    "license": "cc0",
    "updated": 2019,
    "records": 6028,
-   "version": "1.3",
-   "listed": {
-    "updated": 2016
-   }
+   "version": "1.3"
   },
   {
    "id": "src-013",
@@ -150,10 +141,7 @@
    "license": "odbl",
    "updated": 2014,
    "records": 13947,
-   "version": "7",
-   "listed": {
-    "updated": 2011
-   }
+   "version": "7"
   },
   {
    "id": "src-014",
@@ -274,11 +262,7 @@
    "license": "proprietary",
    "updated": 2019,
    "records": 11056,
-   "version": "4.0.2",
-   "listed": {
-    "name": "Clinical Trials Re…",
-    "updated": 2017
-   }
+   "version": "4.0.2"
   },
   {
    "id": "src-025",
@@ -355,11 +339,7 @@
    "license": "cc-by",
    "updated": 2020,
    "records": 66489,
-   "version": "4.0.2",
-   "listed": {
-    "name": "Wildfire Perim…",
-    "updated": 2018
-   }
+   "version": "4.0.2"
   },
   {
    "id": "src-032",
@@ -480,10 +460,7 @@
    "license": "cc0",
    "updated": 2025,
    "records": 63598,
-   "version": "3",
-   "listed": {
-    "updated": 2023
-   }
+   "version": "3"
   },
   {
    "id": "src-043",
@@ -549,10 +526,7 @@
    "license": "cc-by",
    "updated": 2019,
    "records": 21112,
-   "version": "7",
-   "listed": {
-    "name": "Emergency Wait…"
-   }
+   "version": "7"
   }
  ]
 }

@@ -230,7 +230,6 @@ def verify_task(arguments, output, reference, workspace):
         return task_verdict([*integrity, *unchecked], "", 0.0)
     current = {
         source.id: {
-            "name": source.name,
             "access_method": source.access_method.value,
             "updated": source.updated,
             "records": source.records,

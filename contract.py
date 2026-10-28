@@ -10,6 +10,7 @@ from slimconfig import Output
 class Tool(Enum):
     LIST_SOURCES = "list_sources"
     GET_SOURCE = "get_source"
+    CHECK_FRESH = "check_fresh"
     WAIT = "wait"
     RECORD_ENTRY = "record_entry"
     CATALOG_TRUTH = "catalog_truth"
@@ -59,6 +60,7 @@ CITES = (
     "The call_id of the list_sources or get_source call whose response holds this value for this source; the value"
     " must also be the source's current one, as get_source gives it"
 )
+ETAG = "The tag of a revision of the source's fields: two different tags mean different revisions"
 
 
 @dataclass
@@ -72,8 +74,9 @@ class SourceFilter(Output):
 
 @dataclass
 class Source(Output):
-    """A source as list_sources lists it, from a cached index: a name may be cut short with "…" and an updated
-    year may be stale. get_source gives every field as it is now."""
+    """A source as list_sources lists it, from a cached index: for some sources the index holds an older revision,
+    so its access method, updated year, records or version may be stale. Its etag names the revision the index holds;
+    check_fresh gives the current one, and get_source every field as it is now."""
 
     id: Annotated[str, SOURCE_ID]
     name: Annotated[str, "The source's name"]
@@ -82,11 +85,14 @@ class Source(Output):
     access_method: Annotated[AccessMethod, ACCESS_METHOD]
     license: Annotated[License, "The license it is published under"]
     updated: Annotated[int, "The year it was last updated"]
+    records: Annotated[int, "How many records the source holds"]
+    version: Annotated[str, "The source's release version, a string such as 3 or 4.0.2"]
+    etag: Annotated[str, ETAG]
 
 
 @dataclass
 class SourceDetail(Output):
-    """A source as get_source describes it: the listed fields plus its size and version."""
+    """A source as get_source describes it: every field as it is now."""
 
     id: Annotated[str, SOURCE_ID]
     name: Annotated[str, "The source's name"]
@@ -122,11 +128,10 @@ class CitedEntry(Output):
     """One catalog entry: every field is a value and the call it came from."""
 
     id: Annotated[str, SOURCE_ID]
-    name: Annotated[CitedText, "The source's name and the call that gave it"]
     access_method: Annotated[CitedAccessMethod, "The source's access method and the call that gave it"]
     updated: Annotated[CitedNumber, "The year it was last updated and the call that gave it"]
-    records: Annotated[CitedNumber, "How many records it holds (get_source only) and the call that gave it"]
-    version: Annotated[CitedText, "Its version string (get_source only) and the call that gave it"]
+    records: Annotated[CitedNumber, "How many records it holds and the call that gave it"]
+    version: Annotated[CitedText, "Its version string and the call that gave it"]
 
 
 @dataclass
@@ -166,6 +171,23 @@ class GetSourceOutput(Output):
 
 
 @dataclass
+class CheckFreshInput(Output):
+    ids: Annotated[list[str], "1 to 10 source ids, as list_sources lists them"]
+
+
+@dataclass
+class Freshness(Output):
+    id: Annotated[str, SOURCE_ID]
+    etag: Annotated[str, "The source's current etag: a listing that shows another one shows an older revision"]
+
+
+@dataclass
+class CheckFreshOutput(Output):
+    call_id: Annotated[str, CALL_ID]
+    etags: Annotated[list[Freshness], "Each asked source's current etag, in the order asked"]
+
+
+@dataclass
 class WaitInput(Output):
     seconds: Annotated[int, "How many seconds to wait, 0 to 3600: the retry_after a rate-limited call named"]
 
@@ -199,6 +221,7 @@ class CatalogTruthOutput(Output):
 TOOLS = {
     Tool.LIST_SOURCES: (ListSourcesInput, ListSourcesOutput),
     Tool.GET_SOURCE: (GetSourceInput, GetSourceOutput),
+    Tool.CHECK_FRESH: (CheckFreshInput, CheckFreshOutput),
     Tool.WAIT: (WaitInput, WaitOutput),
     Tool.RECORD_ENTRY: (RecordEntryInput, RecordEntryOutput),
     Tool.CATALOG_TRUTH: (CatalogInput, CatalogTruthOutput),

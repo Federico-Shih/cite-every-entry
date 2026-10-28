@@ -11,8 +11,9 @@ from slimconfig import build_output, plain_output
 from contract import CatalogInput, CatalogOutput
 from plugin.__main__ import run_call
 from plugin.engine import RateLimited
+from plugin.lookup import DetailQuotaExhausted
 
-LISTED = ("name", "access_method", "updated")  # the fields list_sources returns too
+FIELDS = ("access_method", "updated", "records", "version")
 
 
 def call(workspace: Path, tool: str, arguments: dict[str, Any], *, give_up: bool = False) -> dict[str, Any] | None:
@@ -26,21 +27,9 @@ def call(workspace: Path, tool: str, arguments: dict[str, Any], *, give_up: bool
             run_call("wait", {"seconds": limited.retry_after}, workspace)
 
 
-def entry(
-    source_id: str,
-    detail: dict[str, Any],
-    detail_call: str,
-    listing_call: str | None = None,
-    shown: dict[str, Any] | None = None,
-) -> dict:
-    """A cited entry: every field from the get_source call, or the listed ones cited to the list_sources call
-    (``listing_call``), with get_source's value, or with the listing's own value when ``shown`` is that listing."""
-    cited = {"id": source_id}
-    for field in ("name", "access_method", "updated", "records", "version"):
-        from_listing = listing_call is not None and field in LISTED
-        value = (shown or detail)[field] if from_listing else detail[field]
-        cited[field] = {"value": value, "cites": listing_call if from_listing else detail_call}
-    return cited
+def entry(source_id: str, shown: dict[str, Any], cites: str) -> dict:
+    """An entry whose every field is ``shown``'s value, cited to the call ``cites``."""
+    return {"id": source_id, **{field: {"value": shown[field], "cites": cites} for field in FIELDS}}
 
 
 def run_agent(
@@ -49,44 +38,60 @@ def run_agent(
     *,
     pages: int | None = None,
     give_up_on_rate_limit: bool = False,
-    cite_listing: bool = False,
+    describe_all: bool = False,
     trust_listing: bool = False,
+    cite_listing: bool = False,
     refilter_on_listing: bool = False,
 ) -> CatalogOutput:
-    """Page through the catalog, describe every listed source and record it with its citations.
+    """Page through the catalog, check each page's etags, describe the stale sources and record every source: a
+    stale one cited to its get_source call, a fresh one to its listing.
 
     Each switch makes one mistake: ``pages`` stops after that many pages; ``give_up_on_rate_limit`` stops at the
-    first rate limit; ``cite_listing`` cites the listed fields to the list_sources call, with get_source's values;
-    ``trust_listing`` takes the listed fields' values from the listing too, and cites it; ``refilter_on_listing``
-    drops a listed source whose listed updated year is before the filter's updated_since."""
+    first rate limit; ``describe_all`` describes every source, skipping those get_source no longer answers;
+    ``trust_listing`` never checks the etags and cites every listing; ``cite_listing`` cites a stale source's
+    current values to its listing; ``refilter_on_listing`` drops a listed source whose listed fields fail the
+    filter."""
     cursor: str | None = None
     recorded = 0
     seen = 0
+    wanted = task.filter
     while True:
-        listed = call(workspace, "list_sources", {"filter": plain_output(task.filter), "cursor": cursor},
+        listed = call(workspace, "list_sources", {"filter": plain_output(wanted), "cursor": cursor},
                       give_up=give_up_on_rate_limit)
         if listed is None:
             break
-        for source in listed["sources"]:
-            if refilter_on_listing and source["updated"] < task.filter.updated_since:
-                continue
-            described = call(workspace, "get_source", {"id": source["id"]}, give_up=give_up_on_rate_limit)
-            if described is None:
+        sources = listed["sources"]
+        if refilter_on_listing:
+            sources = [
+                s for s in sources
+                if s["updated"] >= wanted.updated_since
+                and (not wanted.access_methods or s["access_method"] in {m.value for m in wanted.access_methods})
+            ]
+        stale = {s["id"] for s in sources} if describe_all else set()
+        if sources and not (describe_all or trust_listing):
+            fresh = call(workspace, "check_fresh", {"ids": [s["id"] for s in sources]}, give_up=give_up_on_rate_limit)
+            if fresh is None:
                 break
-            cited = entry(
-                source["id"],
-                described["source"],
-                described["call_id"],
-                listed["call_id"] if cite_listing or trust_listing else None,
-                source if trust_listing else None,
-            )
+            current = {f["id"]: f["etag"] for f in fresh["etags"]}
+            stale = {s["id"] for s in sources if s["etag"] != current[s["id"]]}
+        stopped = False
+        for source in sources:
+            cited = entry(source["id"], source, listed["call_id"])
+            if source["id"] in stale:
+                try:
+                    described = call(workspace, "get_source", {"id": source["id"]}, give_up=give_up_on_rate_limit)
+                except DetailQuotaExhausted:
+                    continue
+                if described is None:
+                    stopped = True
+                    break
+                cites = listed["call_id"] if cite_listing else described["call_id"]
+                cited = entry(source["id"], described["source"], cites)
             run_call("record_entry", {"entry": cited}, workspace)
             recorded += 1
-        else:
-            seen += 1
-            cursor = listed["next_cursor"]
-            if cursor is not None and seen != pages:
-                continue
-        break
+        seen += 1
+        cursor = listed["next_cursor"]
+        if stopped or cursor is None or seen == pages:
+            break
     # What the sandbox hands the verifier: the output rebuilt from its JSON.
     return build_output(plain_output(CatalogOutput(total=recorded)), CatalogOutput)

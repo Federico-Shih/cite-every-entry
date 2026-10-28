@@ -13,6 +13,8 @@ from contract import (
     CatalogInput,
     CatalogOutput,
     CatalogTruthOutput,
+    CheckFreshInput,
+    CheckFreshOutput,
     CitedEntry,
     GetSourceInput,
     GetSourceOutput,
@@ -28,19 +30,21 @@ from plugin.__main__ import run_call
 from plugin.clock import MAX_WAIT
 from plugin.engine import LEDGER, RateLimited
 from plugin.recording import CATALOG
-from plugin.sources import PAGE_SIZE, RATE_LIMIT, RATE_WINDOW
+from plugin.sources import FRESH_BATCH, PAGE_SIZE, RATE_LIMIT, RATE_WINDOW, SEED_FILE, stale
 from verifier import checks
 from verifier.citations import INTEGRITY, OUTCOME, WRONG_TOTAL_FACTOR, score_citations
 
 TASK = "cite-every-entry"
 EVERY = {"domains": [], "formats": [], "access_methods": [], "licenses": [], "updated_since": 0}
 HEALTH = {**EVERY, "domains": ["health"]}  # 8 matches over 2 pages; the last is the catalog's last, src-048
-# The README's example: the same 8, all updated in 2019 or later, though the cached index lists src-012 as 2016
-# and src-024 as 2017.
+# The README's example: the same 8, all updated in 2019 or later, though under seed 0 the cached index lists
+# src-012 as 2016.
 EXAMPLE = {**HEALTH, "updated_since": 2019}
 NOTHING = {**EVERY, "updated_since": 2030}
-# The health fields the cached index shows stale: a name cut short or an old year.
-STALE = ["src-006.name", "src-012.updated", "src-024.name", "src-024.updated", "src-042.updated", "src-048.name"]
+# The health fields the cached index shows stale under seed 0, the seed of a workspace without a seed file.
+STALE = sorted(f"{source}.{field}" for source, fields in stale(0).items() for field in fields
+               if source in {"src-006", "src-012", "src-018", "src-024", "src-030", "src-036", "src-042", "src-048"})
+FIELD_COUNT = 8 * len(checks.FIELDS)
 
 
 # The verifier gets contract instances, as NanoAgent's sandbox builds them from JSON.
@@ -117,7 +121,8 @@ def edit_field(workspace: Path, index: int, field: str, **changes) -> dict:
 
 
 def test_the_verifier_mirrors_the_plugin_constants() -> None:
-    assert (checks.PAGE_SIZE, checks.MAX_WAIT, checks.CATALOG) == (PAGE_SIZE, MAX_WAIT, CATALOG)
+    assert (checks.PAGE_SIZE, checks.MAX_WAIT, checks.CATALOG, checks.FRESH_BATCH) == (
+        PAGE_SIZE, MAX_WAIT, CATALOG, FRESH_BATCH)
     assert checks.FIELDS == tuple(f.name for f in dataclasses.fields(CitedEntry) if f.name != "id")
 
 
@@ -140,7 +145,7 @@ def test_refuses_a_fabricated_call_id(tmp_path: Path) -> None:
     edit_field(tmp_path, 0, "records", cites="call-9999")
     verdict = judge(tmp_path, HEALTH, output)
     assert verdict["valid"] is False and "never made" in verdict["details"]["bad_fields"]["src-006.records"]
-    assert verdict["details"]["cited"] == round(39 / 40, 4) and verdict["score"] == round(39 / 40, 4)
+    assert verdict["details"]["cited"] == round(1 - 1 / FIELD_COUNT, 4) == verdict["score"]
 
 
 def test_refuses_a_real_call_id_from_another_source(tmp_path: Path) -> None:
@@ -150,14 +155,14 @@ def test_refuses_a_real_call_id_from_another_source(tmp_path: Path) -> None:
     assert verdict["valid"] is False and "did not return src-006" in verdict["details"]["bad_fields"]["src-006.version"]
 
 
-@pytest.mark.parametrize("tool", ["record_entry", "wait"])
+@pytest.mark.parametrize("tool", ["record_entry", "wait", "check_fresh"])
 def test_refuses_a_real_call_id_of_a_tool_that_is_not_a_catalog_read(tmp_path: Path, tool: str) -> None:
     output = run_agent(tmp_path, task(HEALTH))
     run_call("wait", {"seconds": 0}, tmp_path)
     other = next(c["call_id"] for c in calls(tmp_path) if c["tool"] == tool)
-    edit_field(tmp_path, 0, "name", cites=other)
+    edit_field(tmp_path, 0, "updated", cites=other)
     verdict = judge(tmp_path, HEALTH, output)
-    assert verdict["valid"] is False and f"a {tool} call" in verdict["details"]["bad_fields"]["src-006.name"]
+    assert verdict["valid"] is False and f"a {tool} call" in verdict["details"]["bad_fields"]["src-006.updated"]
 
 
 @pytest.mark.parametrize(
@@ -179,7 +184,7 @@ def test_refuses_a_value_of_the_wrong_type(tmp_path: Path, field: str, value) ->
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("name", "Hospital Bed Capacity "), ("name", "hospital bed capacity"), ("records", 48515), ("access_method", "sql")],
+    [("version", "7.0"), ("updated", 2024), ("records", 48515), ("access_method", "sql")],
 )
 def test_refuses_an_edited_value(tmp_path: Path, field: str, value) -> None:
     output = run_agent(tmp_path, task(HEALTH))
@@ -237,20 +242,20 @@ def test_refuses_a_missing_catalog_file(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "cited",
     [
-        pytest.param("Hospital Bed Capacity", id="a bare value"),
-        pytest.param({"value": "Hospital Bed Capacity"}, id="no cites"),
-        pytest.param({"value": "Hospital Bed Capacity", "cites": None}, id="null cites"),
-        pytest.param({"value": "Hospital Bed Capacity", "cites": 2}, id="a number for cites"),
+        pytest.param("7", id="a bare value"),
+        pytest.param({"value": "7"}, id="no cites"),
+        pytest.param({"value": "7", "cites": None}, id="null cites"),
+        pytest.param({"value": "7", "cites": 2}, id="a number for cites"),
     ],
 )
 def test_refuses_a_field_without_a_citation(tmp_path: Path, cited) -> None:
     output = run_agent(tmp_path, task(HEALTH))
     rows = entries(tmp_path)
-    rows[0]["name"] = cited
+    rows[0]["version"] = cited
     write_entries(tmp_path, rows)
     verdict = judge(tmp_path, HEALTH, output)
-    assert verdict["valid"] is False and verdict["details"]["bad_fields"] == {"src-006.name": "not {value, cites}"}
-    assert verdict["score"] == round(39 / 40, 4)
+    assert verdict["valid"] is False and verdict["details"]["bad_fields"] == {"src-006.version": "not {value, cites}"}
+    assert verdict["score"] == round(1 - 1 / FIELD_COUNT, 4)
 
 
 def test_refuses_a_missing_field(tmp_path: Path) -> None:
@@ -274,7 +279,7 @@ def test_refuses_citations_without_a_ledger(tmp_path: Path) -> None:
     run_agent(tmp_path, task(HEALTH))
     (tmp_path / LEDGER).unlink()
     verdict = judge(tmp_path, HEALTH, total(8))
-    assert verdict["valid"] is False and len(verdict["details"]["bad_fields"]) == 40 and verdict["score"] == 0.0
+    assert verdict["valid"] is False and len(verdict["details"]["bad_fields"]) == FIELD_COUNT and verdict["score"] == 0.0
 
 
 def test_refuses_a_task_without_a_reference_or_with_a_bad_filter(tmp_path: Path) -> None:
@@ -295,7 +300,8 @@ def test_refuses_a_task_without_a_reference_or_with_a_bad_filter(tmp_path: Path)
         "[]",
         '{"entries": {}}',
         '{"entries": ["src-006"]}',
-        '{"entries": [{"name": {"value": "x", "cites": "call-0001"}}]}',
+        '{"entries": [{"version": {"value": "x", "cites": "call-0001"}}]}',
+        '{"entries": [{"id": "src-006", "name": {"value": "x", "cites": "call-0001"}}]}',
         '{"entries": [{"id": 6}]}',
         '{"entries": [{"id": "src-006", "license": {"value": "odbl", "cites": "call-0001"}}]}',
     ],
@@ -331,22 +337,21 @@ def test_a_rate_limited_call_then_its_retry_cites_the_retry(tmp_path: Path) -> N
 
 
 def test_citing_list_sources_holds_only_where_its_listing_is_current(tmp_path: Path) -> None:
-    # Current values cited to the listing: right wherever the cached index shows them as they are.
+    # A stale source's current values cited to its listing: right except where the listing shows them stale.
     output = run_agent(tmp_path, task(HEALTH), cite_listing=True)
-    first = entries(tmp_path)[0]
-    assert first["name"]["cites"] != first["records"]["cites"]
     verdict = judge(tmp_path, HEALTH, output)
     assert verdict["valid"] is False and sorted(verdict["details"]["bad_fields"]) == STALE
+    assert failing(verdict) == ["fields-cited"]
     assert "what call-" in verdict["details"]["bad_fields"]["src-012.updated"]
 
 
 def test_a_stale_listing_value_cited_faithfully_is_still_wrong(tmp_path: Path) -> None:
-    # The listing's own values cited to the listing: every citation holds, but 6 values are not current.
+    # The listing's own values cited to the listing: every citation holds, but the stale values are not current.
     output = run_agent(tmp_path, task(HEALTH), trust_listing=True)
     verdict = judge(tmp_path, HEALTH, output)
     assert verdict["valid"] is False and sorted(verdict["details"]["bad_fields"]) == STALE
     assert "current updated is 2019" in verdict["details"]["bad_fields"]["src-012.updated"]
-    assert verdict["details"]["cited"] == round(1 - len(STALE) / 40, 4)
+    assert verdict["details"]["cited"] == round(1 - len(STALE) / FIELD_COUNT, 4)
     # The citations hold; only the values are not current, and the check names what get_source gives.
     assert failing(verdict) == ["values-current"]
     assert named(verdict, "values-current")["expected"]["src-012.updated"] == 2019
@@ -357,24 +362,37 @@ def test_a_stale_listed_year_does_not_drop_a_match(tmp_path: Path) -> None:
     refiltered = tmp_path / "refiltered"
     refiltered.mkdir()
     verdict = judge(refiltered, EXAMPLE, run_agent(refiltered, task(EXAMPLE), refilter_on_listing=True))
-    assert verdict["valid"] is False and verdict["details"]["missing"] == ["src-012", "src-024"]
+    assert verdict["valid"] is False and verdict["details"]["missing"] == ["src-012"]
 
 
-def test_list_sources_cannot_be_cited_for_what_it_does_not_list(tmp_path: Path) -> None:
-    output = run_agent(tmp_path, task(HEALTH), cite_listing=True)
-    listing_call = entries(tmp_path)[0]["name"]["cites"]
-    edit_field(tmp_path, 0, "records", cites=listing_call)
-    verdict = judge(tmp_path, HEALTH, output)
-    assert verdict["valid"] is False and "has no records" in verdict["details"]["bad_fields"]["src-006.records"]
+def seeded(workspace: Path, seed: int) -> Path:
+    (workspace / SEED_FILE).parent.mkdir(parents=True)
+    (workspace / SEED_FILE).write_text(json.dumps({"seed": seed}))
+    return workspace
+
+
+@pytest.mark.parametrize("seed", [0, 3, 11])
+def test_only_checking_the_etags_cites_every_seed_rightly(tmp_path: Path, seed: int) -> None:
+    # The citation that holds depends on what the responses say: no fixed rule of which call to cite passes.
+    right = seeded(tmp_path / "right", seed)
+    assert judge(right, EXAMPLE, run_agent(right, task(EXAMPLE)))["valid"] is True
+    # get_source for every source: its budget runs out, so sources go unrecorded.
+    described = seeded(tmp_path / "described", seed)
+    verdict = judge(described, EXAMPLE, run_agent(described, task(EXAMPLE), describe_all=True))
+    assert "all-recorded" in failing(verdict) and any("DetailQuotaExhausted" in c.get("error", "") for c in calls(described))
+    # The listing for every source: its stale values are not current.
+    trusted = seeded(tmp_path / "trusted", seed)
+    verdict = judge(trusted, EXAMPLE, run_agent(trusted, task(EXAMPLE), trust_listing=True))
+    assert failing(verdict) == ["values-current"]
 
 
 def test_a_listing_page_is_cited_only_for_the_sources_it_lists(tmp_path: Path) -> None:
-    output = run_agent(tmp_path, task(HEALTH), cite_listing=True)
+    output = run_agent(tmp_path, task(HEALTH))
     rows = entries(tmp_path)
-    second_page = rows[-1]["name"]["cites"]
-    edit_field(tmp_path, 0, "name", cites=second_page)
+    second_page = rows[-1]["updated"]["cites"]
+    edit_field(tmp_path, 0, "updated", cites=second_page)
     verdict = judge(tmp_path, HEALTH, output)
-    assert verdict["valid"] is False and "did not return src-006" in verdict["details"]["bad_fields"]["src-006.name"]
+    assert verdict["valid"] is False and "did not return src-006" in verdict["details"]["bad_fields"]["src-006.updated"]
 
 
 def test_an_empty_match_needs_no_catalog_and_a_zero_total(tmp_path: Path) -> None:
@@ -388,7 +406,9 @@ def test_an_empty_match_needs_no_catalog_and_a_zero_total(tmp_path: Path) -> Non
 
 def test_giving_up_at_a_rate_limit_misses_sources(tmp_path: Path) -> None:
     verdict = judge(tmp_path, HEALTH, run_agent(tmp_path, task(HEALTH), give_up_on_rate_limit=True))
-    assert verdict["valid"] is False and len(verdict["details"]["missing"]) == 8 - (RATE_LIMIT - 1)
+    # The first page's list, check_fresh and its two stale sources' get_source spend the window; the second
+    # page's list is rate-limited.
+    assert verdict["valid"] is False and len(verdict["details"]["missing"]) == 8 - PAGE_SIZE
     assert verdict["details"]["cited"] == 1.0
 
 
@@ -398,8 +418,7 @@ def good_calls() -> tuple[list, dict]:
     recorded, ledger = [], {}
     for number, source in enumerate("abcd", 1):
         call_id = f"call-{number:04d}"
-        detail = {"id": source, "name": source.upper(), "access_method": "rest", "updated": 2020, "records": number,
-                  "version": str(number)}
+        detail = {"id": source, "access_method": "rest", "updated": 2020, "records": number, "version": str(number)}
         ledger[call_id] = {"call_id": call_id, "tool": "get_source", "response": {"call_id": call_id, "source": detail}}
         recorded.append((source, {f: {"value": detail[f], "cites": call_id} for f in checks.FIELDS}))
     return recorded, ledger
@@ -420,19 +439,19 @@ def with_bad(recorded: list, count: int) -> list:
 
 # The four sources' current fields, as get_source gives them: what good_calls cites.
 CURRENT = {
-    source: {"name": source.upper(), "access_method": "rest", "updated": 2020, "records": number, "version": str(number)}
+    source: {"access_method": "rest", "updated": 2020, "records": number, "version": str(number)}
     for number, source in enumerate("abcd", 1)
 }
 
 
 def test_a_faithfully_cited_value_that_is_not_current_is_miscited() -> None:
     recorded, ledger = good_calls()
-    ledger["call-0001"]["response"]["source"]["name"] = "A (OLD)"
-    recorded[0][1]["name"]["value"] = "A (OLD)"
+    ledger["call-0001"]["response"]["source"]["version"] = "0"
+    recorded[0][1]["version"]["value"] = "0"
     verdict = score_citations(recorded, ledger, CURRENT, 4, 4)
-    assert verdict["valid"] is False and verdict["score"] == 0.95
-    assert verdict["details"]["bad_fields"] == {"a.name": "'A (OLD)' is what call-0001 returned, but the source's "
-                                                          "current name is 'A'"}
+    assert verdict["valid"] is False and verdict["score"] == 0.9375
+    assert verdict["details"]["bad_fields"] == {"a.version": "'0' is what call-0001 returned, but the source's "
+                                                             "current version is '1'"}
 
 
 @pytest.mark.parametrize(
@@ -440,9 +459,9 @@ def test_a_faithfully_cited_value_that_is_not_current_is_miscited() -> None:
     [
         pytest.param(lambda r: r, 4, True, 1.0, id="exact"),
         pytest.param(lambda r: r, 3, False, 0.5, id="exact catalog, wrong total"),
-        pytest.param(lambda r: with_bad(r, 1), 4, False, 0.95, id="one of 20 fields miscited"),
-        pytest.param(lambda r: with_bad(r, 10), 4, False, 0.5, id="half the fields miscited"),
-        pytest.param(lambda r: with_bad(r, 20), 4, False, 0.0, id="every field miscited"),
+        pytest.param(lambda r: with_bad(r, 1), 4, False, 0.9375, id="one of 16 fields miscited"),
+        pytest.param(lambda r: with_bad(r, 8), 4, False, 0.5, id="half the fields miscited"),
+        pytest.param(lambda r: with_bad(r, 16), 4, False, 0.0, id="every field miscited"),
         pytest.param(lambda r: r[:3], 4, False, 0.8571, id="one source missing"),
         pytest.param(lambda r: [*r, r[0]], 4, False, 0.8889, id="one source repeated"),
         pytest.param(lambda r: [], 0, False, 0.0, id="nothing recorded"),
@@ -486,6 +505,17 @@ def test_get_source_checks(tmp_path: Path) -> None:
     assert verifier.verify_input("get_source", build_output({"id": "health-6"}, GetSourceInput))["valid"] is False
     other = build_output({"id": "src-012"}, GetSourceInput)
     assert verifier.verify_output("get_source", other, made, str(tmp_path))["valid"] is False
+
+
+def test_check_fresh_checks(tmp_path: Path) -> None:
+    given = build_output({"ids": ["src-006", "src-012"]}, CheckFreshInput)
+    made = build_output(run_call("check_fresh", plain_output(given), tmp_path), CheckFreshOutput)
+    assert verifier.verify_input("check_fresh", given)["valid"] is True
+    assert verifier.verify_output("check_fresh", given, made, str(tmp_path))["valid"] is True
+    for ids in ([], ["health-6"], ["src-006", "src-006"]):
+        assert verifier.verify_input("check_fresh", build_output({"ids": ids}, CheckFreshInput))["valid"] is False
+    swapped = build_output({"ids": ["src-012", "src-006"]}, CheckFreshInput)
+    assert verifier.verify_output("check_fresh", swapped, made, str(tmp_path))["valid"] is False
 
 
 def test_wait_checks(tmp_path: Path) -> None:

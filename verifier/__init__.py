@@ -2,11 +2,12 @@
 
 from contract import Task, Tool
 
-from . import citations, clock, listing, lookup, recording, truth
+from . import citations, clock, freshness, listing, lookup, recording, truth
 
 TOOLS = {
     Tool.LIST_SOURCES: listing,
     Tool.GET_SOURCE: lookup,
+    Tool.CHECK_FRESH: freshness,
     Tool.WAIT: clock,
     Tool.RECORD_ENTRY: recording,
     Tool.CATALOG_TRUTH: truth,

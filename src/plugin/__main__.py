@@ -13,7 +13,7 @@ from mcp.server.stdio import stdio_server
 from slimconfig import build_output, output_schema, plain_output
 
 from contract import TOOLS, Tool
-from plugin import catalog_truth, get_source, list_sources, record_entry, wait
+from plugin import catalog_truth, check_fresh, get_source, list_sources, record_entry, wait
 from plugin.engine import session_for
 
 server = Server("cite-every-entry")
@@ -23,6 +23,7 @@ WORKSPACE_ENV = "NANOAGENT_WORKSPACE"
 IMPLEMENTATIONS = {
     Tool.LIST_SOURCES: list_sources,
     Tool.GET_SOURCE: get_source,
+    Tool.CHECK_FRESH: check_fresh,
     Tool.WAIT: wait,
     Tool.RECORD_ENTRY: record_entry,
     Tool.CATALOG_TRUTH: catalog_truth,

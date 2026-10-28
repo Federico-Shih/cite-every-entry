@@ -10,14 +10,32 @@ from contract import AccessMethod, GetSourceInput, Tool
 from plugin import get_source
 from plugin.__main__ import IMPLEMENTATIONS, run_call
 from plugin.engine import LEDGER, RateLimited
+from plugin.lookup import DetailQuotaExhausted
 from plugin.recording import CATALOG
-from plugin.sources import PAGE_SIZE, RATE_LIMIT, RATE_WINDOW, catalog
+from plugin.sources import (
+    DETAIL_SLACK,
+    FRESH_BATCH,
+    PAGE_SIZE,
+    RATE_LIMIT,
+    RATE_WINDOW,
+    SEED_FILE,
+    STALE_PER_DOMAIN,
+    catalog,
+    stale,
+)
 
 EVERY = {"domains": [], "formats": [], "access_methods": [], "licenses": [], "updated_since": 0}
 
 
 def listing(cursor: str | None = None, **wanted) -> dict:
     return {"filter": {**EVERY, **wanted}, "cursor": cursor}
+
+
+def seeded(workspace: Path, seed: int) -> Path:
+    """``workspace`` with the run seed NanoAgent stages as an input file."""
+    (workspace / SEED_FILE).parent.mkdir(parents=True, exist_ok=True)
+    (workspace / SEED_FILE).write_text(json.dumps({"seed": seed}))
+    return workspace
 
 
 def ledger(workspace: Path) -> list[dict]:
@@ -52,25 +70,66 @@ def test_a_tool_run_outside_a_call_refuses(tmp_path: Path) -> None:
         get_source(GetSourceInput(id="src-006"), tmp_path)
 
 
-def test_list_sources_pages_through_the_filtered_catalog_without_details(tmp_path: Path) -> None:
+def test_list_sources_pages_through_the_filtered_catalog_with_every_field(tmp_path: Path) -> None:
     first = run_call("list_sources", listing(domains=["health"]), tmp_path)
     assert len(first["sources"]) == PAGE_SIZE and first["next_cursor"] == "cursor-5"
-    assert all(source["domain"] == "health" and "records" not in source for source in first["sources"])
+    assert all(source["domain"] == "health" and {"records", "version", "etag"} <= set(source)
+               for source in first["sources"])
     last = run_call("list_sources", listing(first["next_cursor"], domains=["health"]), tmp_path)
     assert last["sources"][-1]["id"] == "src-048" and last["next_cursor"] is None
 
 
-def test_the_listing_is_a_cached_index_that_get_source_corrects(tmp_path: Path) -> None:
-    # updated_since 2019 still lists src-012 and src-024: the filter goes by the current year, not the listed one.
-    shown = run_call("list_sources", listing(domains=["health"], updated_since=2019), tmp_path)["sources"]
-    by_id = {source["id"]: source for source in shown}
-    assert (by_id["src-012"]["updated"], by_id["src-024"]["updated"]) == (2016, 2017)
-    assert by_id["src-006"]["name"] == "Hospital Bed Capac…"
-    current = run_call("get_source", {"id": "src-012"}, tmp_path)["source"]
-    assert current["updated"] == 2019
-    assert run_call("get_source", {"id": "src-006"}, tmp_path)["source"]["name"] == "Hospital Bed Capacity"
-    # Where the index is current, the listing and get_source agree.
-    assert by_id["src-018"]["name"] == run_call("get_source", {"id": "src-018"}, tmp_path)["source"]["name"]
+@pytest.mark.parametrize("seed", [0, 7])
+def test_the_listing_is_a_cached_index_that_check_fresh_and_get_source_correct(tmp_path: Path, seed: int) -> None:
+    workspace = seeded(tmp_path, seed)
+    shown = call(workspace, "list_sources", listing(domains=["health"]))["sources"]
+    shown += call(workspace, "list_sources", listing("cursor-5", domains=["health"]))["sources"]
+    fresh = call(workspace, "check_fresh", {"ids": [s["id"] for s in shown]})["etags"]
+    current = {f["id"]: f["etag"] for f in fresh}
+    flagged = {s["id"] for s in shown if s["etag"] != current[s["id"]]}
+    # STALE_PER_DOMAIN of the domain's sources, exactly those whose etag check_fresh contradicts.
+    assert flagged == {i for i in stale(seed) if i in current} and len(flagged) == STALE_PER_DOMAIN
+    by_id = {s["id"]: s for s in shown}
+    now = {i: call(workspace, "get_source", {"id": i})["source"] for i in flagged}
+    for source_id in flagged:
+        differs = [f for f in ("access_method", "updated", "records", "version") if by_id[source_id][f] != now[source_id][f]]
+        assert differs == list(stale(seed)[source_id])
+    # The first stale source of every domain shows an older year: a listing can look too old for the filter.
+    assert any(by_id[i]["updated"] < now[i]["updated"] for i in flagged)
+
+
+def test_the_seed_picks_the_stale_sources(tmp_path: Path) -> None:
+    assert stale(0) != stale(7)
+    # Without a seed file the seed is 0.
+    unseeded = run_call("list_sources", listing(), tmp_path)["sources"]
+    assert unseeded == run_call("list_sources", listing(), seeded(tmp_path / "zero", 0))["sources"]
+    (seeded(tmp_path, 0) / SEED_FILE).write_text(json.dumps({"seed": "seven"}))
+    with pytest.raises(ValueError, match="seed"):
+        run_call("list_sources", listing(), tmp_path)
+
+
+def test_get_source_answers_two_more_calls_than_the_stale_sources_shown(tmp_path: Path) -> None:
+    shown = call(tmp_path, "list_sources", listing(domains=["health"]))["sources"]
+    stale_shown = sum(s["id"] in stale(0) for s in shown)
+    allowed = stale_shown + DETAIL_SLACK
+    for source in shown[:allowed]:
+        call(tmp_path, "get_source", {"id": source["id"]})
+    with pytest.raises(DetailQuotaExhausted, match="check_fresh"):
+        call(tmp_path, "get_source", {"id": shown[-1]["id"]})
+    assert "error" in ledger(tmp_path)[-1]
+    # Listing more stale sources raises the budget; a refused call does not spend it.
+    more = call(tmp_path, "list_sources", listing("cursor-5", domains=["health"]))["sources"]
+    assert sum(s["id"] in stale(0) for s in more) == STALE_PER_DOMAIN - stale_shown
+    if STALE_PER_DOMAIN > stale_shown:
+        assert call(tmp_path, "get_source", {"id": more[0]["id"]}) is not None
+
+
+def test_check_fresh_takes_1_to_10_known_ids_once_each(tmp_path: Path) -> None:
+    ids = [source.id for source in catalog()]
+    assert len(run_call("check_fresh", {"ids": ids[:FRESH_BATCH]}, tmp_path)["etags"]) == FRESH_BATCH
+    for asked, problem in ([], "1 to"), (ids[: FRESH_BATCH + 1], "1 to"), (["src-999"], "unknown"), (ids[:1] * 2, "once"):
+        with pytest.raises(ValueError, match=problem):
+            run_call("check_fresh", {"ids": asked}, tmp_path)
 
 
 def test_get_source_describes_one_source_and_refuses_an_unknown_id(tmp_path: Path) -> None:

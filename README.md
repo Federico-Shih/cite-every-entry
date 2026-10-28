@@ -6,33 +6,47 @@ structure of NanoAgent's reference plugin,
 
 An agent pages through a rate-limited mock catalog of 48 data sources, looks up
 every source that matches a structured filter, and records it in `catalog.json`
-with five fields: `name`, `access_method` (`rest`, `file`, `hub` or `sql`, as
-Empiric's `AccessKind`), `updated`, `records` and `version`. Every field is
-`{value, cites}`: the value and the `call_id` of the `list_sources` or
-`get_source` call that returned it. Every call is recorded in the call ledger,
-`.ledger/calls.jsonl`, and the verifier replays each citation against it. The
-catalog ships in `src/plugin/fixtures/catalog.json` and the rate limit runs on
-a virtual clock, so every run is the same and needs no network.
+with four fields: `access_method` (`rest`, `file`, `hub` or `sql`, as
+Empiric's `AccessKind`), `updated`, `records` and `version`. A source's name is
+not one of them: free text is never judged. Every field is `{value, cites}`:
+the value and the `call_id` of the `list_sources` or `get_source` call that
+returned it. Every call is recorded in the call ledger, `.ledger/calls.jsonl`,
+and the verifier replays each citation against it. The catalog ships in
+`src/plugin/fixtures/catalog.json` and the rate limit runs on a virtual clock,
+so a run needs no network and the same seed gives the same run.
 
-`list_sources` reads a cached index. For 8 sources it shows a name cut short
-with `…` or a stale `updated` year (a fixture row's `listed` fields), while
-`get_source` gives every field as it is now. A value faithfully cited to a
-listing that shows it stale is still wrong: every value must be the source's
-current one. The filter goes by the current year too, so a listing can show a
-year older than `updated_since` for a source that matches.
+`list_sources` reads a cached index that holds an older revision of 2 sources
+of every domain. The run's seed (`inputs/seed.json`, `{"seed": <int>}`, a
+NanoAgent input file; 0 without one) picks which, and which field is stale: the
+first source of each domain shows an older `updated` year, the second an older
+`access_method`, `updated`, `records` or `version`. Nothing in the values shows
+which rows are stale. Each listed source carries the `etag` of the revision
+listed, `check_fresh` gives the current one, and `get_source` gives every field
+as it is now. A value faithfully cited to a listing that shows it stale is still
+wrong: every value must be the source's current one. The filter goes by the
+current fields too, so a listing can show a year older than `updated_since`, or
+an access method outside `access_methods`, for a source that matches.
+
+`get_source` answers at most 2 calls more than the stale sources the run's
+`list_sources` calls have shown, so it cannot describe every source. An agent
+that calls it for everything runs out and leaves sources unrecorded, and one
+that cites the listing for everything cites stale values. Which call a field
+must cite depends on what the responses say: the agent has to compare each
+listed etag with the current one.
 
 ## Tools
 
 | Tool | Does | Code |
 |---|---|---|
-| `list_sources` | Lists one page (5 sources) of the sources that match a filter, from a cached index that may show a name cut short or a stale year, without `records` and `version`; its response carries its `call_id`; rate-limited | `src/plugin/listing.py` |
-| `get_source` | Describes one source with every field, `records` and `version` included; its response carries its `call_id`; rate-limited, and an unknown id raises | `src/plugin/lookup.py` |
+| `list_sources` | Lists one page (5 sources) of the sources that match a filter, every field and an `etag` included, from a cached index that holds an older revision of some sources; its response carries its `call_id`; rate-limited | `src/plugin/listing.py` |
+| `get_source` | Describes one source with every field as it is now; its response carries its `call_id`; rate-limited, an unknown id raises, and so does a call past the run's budget (2 more answered calls than the stale sources listed) | `src/plugin/lookup.py` |
+| `check_fresh` | The current `etag` of 1 to 10 sources; an unknown or repeated id raises; rate-limited | `src/plugin/freshness.py` |
 | `wait` | Moves the run's virtual clock forward by 0 to 3600 seconds | `src/plugin/clock.py` |
-| `record_entry` | Appends a source's id and its five cited fields to `catalog.json`; an unknown or repeated id raises, the citations are not checked | `src/plugin/recording.py` |
+| `record_entry` | Appends a source's id and its four cited fields to `catalog.json`; an unknown or repeated id raises, the citations are not checked | `src/plugin/recording.py` |
 | `catalog_truth` | The hidden reference: the id and current fields of every source the filter matches, and their count | `src/plugin/truth.py` |
 
-`list_sources` and `get_source` share one budget: at most 4 calls per 60
-virtual seconds, else they raise `rate limited: wait N seconds`. Every call,
+`list_sources`, `get_source` and `check_fresh` share one rate limit: at most 4
+calls per 60 virtual seconds, else they raise `rate limited: wait N seconds`. Every call,
 failed ones too, is a line of `.ledger/calls.jsonl` (`call_id`, `tool`,
 `input`, and its `response` or `error`), written by the MCP server
 (`run_call` in `src/plugin/__main__.py`).
@@ -41,7 +55,7 @@ failed ones too, is a line of `.ledger/calls.jsonl` (`call_id`, `tool`,
 
 | Task | Does | Runner |
 |---|---|---|
-| `cite-every-entry` | Records every source that matches the filter in `catalog.json`, each field citing the call it came from, and submits the total; checked against the call ledger and `catalog_truth` | `agent`, with `list_sources`, `get_source`, `wait` and `record_entry` |
+| `cite-every-entry` | Records every source that matches the filter in `catalog.json`, each field citing the call it came from, and submits the total; checked against the call ledger and `catalog_truth` | `agent`, with `list_sources`, `get_source`, `check_fresh`, `wait` and `record_entry` |
 
 ## Checks
 
@@ -58,13 +72,13 @@ integrity: when one fails, checks 5 to 10 are not checked.
 |---|---|---|---|
 | 1 | `reference` | `catalog_truth` pinned the matching sources before the agent ran | catalog_truth was not pinned |
 | 2 | `task-input` | The task's filter is valid | updated_since must be a year, or 0 for every year |
-| 3 | `catalog-file` | `catalog.json`, if written, is `{"entries": [...]}` with each entry `{id, name, access_method, updated, records, version}` | catalog.json holds an entry that is not {id, name, access_method, updated, records, version}: {'id': 6} |
+| 3 | `catalog-file` | `catalog.json`, if written, is `{"entries": [...]}` with each entry `{id, access_method, updated, records, version}` | catalog.json holds an entry that is not {id, access_method, updated, records, version}: {'id': 6} |
 | 4 | `ledger` | The call ledger `.ledger/calls.jsonl` is readable, one call per line | the call ledger is broken: ledger line 23 is not JSON |
 | 5 | `all-recorded` | Every source the filter matches is recorded | 2 matching sources are not recorded: src-012, src-024 |
 | 6 | `no-extra` | No source the filter does not match is recorded | 1 recorded source does not match the filter: src-001 |
 | 7 | `no-repeats` | No source is recorded twice | recorded more than once: src-006 (2 times) |
-| 8 | `fields-cited` | Every field is `{value, cites}`, citing a successful `list_sources` or `get_source` call that returned exactly that value for that source, JSON type included (`"3"` is not `3`) | 6 fields are not cited rightly: src-006.name: 'Hospital Bed Capacity' is not 'Hospital Bed Capac…', what call-0001 returned; … |
-| 9 | `values-current` | Every rightly cited value is the source's current value in `catalog_truth` | 6 fields are not current: src-012.updated: 2016 is what call-0001 returned, but the source's current updated is 2019; … |
+| 8 | `fields-cited` | Every field is `{value, cites}`, citing a successful `list_sources` or `get_source` call that returned exactly that value for that source, JSON type included (`"3"` is not `3`) | 2 fields are not cited rightly: src-012.updated: 2019 is not 2016, what call-0001 returned; … |
+| 9 | `values-current` | Every rightly cited value is the source's current value in `catalog_truth` | 2 fields are not current: src-012.updated: 2016 is what call-0001 returned, but the source's current updated is 2019; … |
 | 10 | `total-exact` | The submitted total is the number of sources the filter matches | total 7 is not the true count 8 |
 
 A field fails at most one of 8 and 9: a citation that does not hold is never
@@ -107,7 +121,7 @@ also judged for being current.
 │   └── fixtures/    # the mock catalog, catalog.json
 ├── tests/
 │   ├── run_agent.sh # one agent run on OpenRouter: config, nanoagent plugin agent, verdict
-│   ├── examples/    # the task's example arguments, <id>.json
+│   ├── examples/    # the task's example arguments, <id>.json, and its input files, inputs/seed.json
 │   └── results/     # one folder per agent run (git-ignored)
 ├── ui/              # how the page draws the outputs: renderers.js and renderers.css
 ├── product/         # the product page a catalog shows: product.yaml and icon.svg
@@ -157,9 +171,12 @@ call path, so its calls land in the ledger as a real run's do.
 
 Run the `cite-every-entry` task with `nanoagent plugin agent`: its run config
 names this plugin, the task and its `filter` argument, e.g. domains `[health]`
-with every other list empty and `updated_since: 0`. The agent uses
-`list_sources`, `get_source`, `wait` and `record_entry`; NanoAgent runs
-`catalog_truth` before the task and pins its output for the verifier.
+with every other list empty and `updated_since: 0`, and its `inputs` the seed
+file, `seed.json` (`{"seed": 7}`), which NanoAgent copies to
+`workspace/inputs/`. The agent uses `list_sources`, `get_source`,
+`check_fresh`, `wait` and `record_entry`; NanoAgent runs `catalog_truth` before
+the task and pins its output for the verifier. The reference does not depend
+on the seed: only the cached index does.
 
 To run the agent, with NanoAgent on `PATH` and an OpenRouter key:
 
@@ -167,6 +184,7 @@ To run the agent, with NanoAgent on `PATH` and an OpenRouter key:
 export OPENROUTER_API_KEY=...          # or ENV_FILE=path/to/keys.env
 tests/run_agent.sh                     # tests/examples/cite-every-entry.json
 tests/run_agent.sh path/to/arguments.json
+INPUTS=path/to/seed.json tests/run_agent.sh   # another seed; tests/examples/inputs/seed.json by default
 ```
 
 The script writes a NanoAgent run config (`PluginOpenRouterAgentConfig`), runs

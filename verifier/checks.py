@@ -6,12 +6,14 @@ import re
 # tests/test_verifier.py holds them equal.
 PAGE_SIZE = 5
 MAX_WAIT = 3600
+FRESH_BATCH = 10
 CATALOG = "catalog.json"
 CURSOR = re.compile(r"cursor-(\d+)")
 SOURCE_ID = re.compile(r"src-\d{3}")
 CALL_ID = re.compile(r"call-\d{4,}")
 # Every cited field of a catalog entry (contract.CitedEntry, less its id), and the tools whose responses it may cite.
-FIELDS = ("name", "access_method", "updated", "records", "version")
+# The name is not one: free text is never judged.
+FIELDS = ("access_method", "updated", "records", "version")
 CITABLE = ("list_sources", "get_source")
 
 
@@ -55,11 +57,11 @@ def task_verdict(checks, summary, score, **details):
 
 def listing_matches(source, wanted):
     """Whether the listed contract Source ``source`` passes the contract SourceFilter ``wanted`` on every field the
-    cached index shows as it is: the filter goes by the current updated year, which a listing may show stale."""
+    cached index never shows stale: the filter goes by the current access method and updated year, which a listing
+    may show stale."""
     return (
         (not wanted.domains or source.domain in wanted.domains)
         and (not wanted.formats or source.format in wanted.formats)
-        and (not wanted.access_methods or source.access_method in wanted.access_methods)
         and (not wanted.licenses or source.license in wanted.licenses)
     )
 
@@ -82,7 +84,6 @@ def plain_entry(entry):
     """A contract CitedEntry as record_entry writes it to catalog.json."""
     return {
         "id": entry.id,
-        "name": {"value": entry.name.value, "cites": entry.name.cites},
         "access_method": {"value": entry.access_method.value.value, "cites": entry.access_method.cites},
         "updated": {"value": entry.updated.value, "cites": entry.updated.cites},
         "records": {"value": entry.records.value, "cites": entry.records.cites},
